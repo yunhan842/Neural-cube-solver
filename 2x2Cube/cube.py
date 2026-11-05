@@ -84,6 +84,11 @@ class Kociemba2x2:
         # Hash state for dicts/sets e.g. doing BFS over all states
         return self.cp.tobytes() + self.co.tobytes()
 
+    @classmethod
+    def from_key(cls, key):
+        # Inverse of key(): the first 8 bytes are cp and last 8 are co
+        return cls(np.frombuffer(key[:8], dtype=np.int8), np.frombuffer(key[8:], dtype=np.int8))
+
     def __eq__(self, other):
         return np.array_equal(self.cp, other.cp) and np.array_equal(self.co, other.co)
 
