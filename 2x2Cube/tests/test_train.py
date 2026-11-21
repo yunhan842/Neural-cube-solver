@@ -59,3 +59,8 @@ def test_per_distance_report():
     assert rows[1]["rounded_acc"] == pytest.approx(1.0)   # 1.4 and 0.6 both round to 1
     assert rows[1]["overestimate"] == pytest.approx(0.5)  # only 1.4 > 1
     assert rows[2]["overestimate"] == pytest.approx(0.5)  # 2.0 isn't > 2, 3.0 is
+
+def test_make_xy_uses_requested_encoding(arrays):
+    cp, co, d = arrays
+    X, y = make_xy(cp, co, d, "stickers_144")
+    assert X.shape == (len(d), 144) and y.shape == (len(d), 1)

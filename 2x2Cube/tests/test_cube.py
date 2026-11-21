@@ -3,7 +3,8 @@ import pytest
 
 from cube import (
     Kociemba2x2, MOVE_NAMES, MOVE_CP, MOVE_CO, SOLVED_PERMUTATION, SOLVED_ORIENTATION,
-    compose, apply_batch_moves, random_scrambles, encode_onehot
+    compose, apply_batch_moves, random_scrambles, encode_onehot, U_COL, R_COL, F_COL, 
+    D_COL, CORNER_COLORS, sticker_colors, encode_stickers
 )
 
 def test_new_cube_is_solved_and_valid():
@@ -108,3 +109,27 @@ def test_onehot_encoding():
     solved = encode_onehot(SOLVED_PERMUTATION[None], SOLVED_ORIENTATION[None])
     # Position 0 holds piece 0 with twist 0
     assert solved[0, :11].tolist() == [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
+
+def test_solved_stickers_show_each_corners_own_colors():
+    colors = sticker_colors(SOLVED_PERMUTATION[None], SOLVED_ORIENTATION[None])[0]
+    assert (colors == CORNER_COLORS).all()
+
+def test_R_moves_front_stickers_up():
+    # After R, URF position's U sticker is the F color that was below it; R stickers stays R
+    cube = Kociemba2x2().apply_move("R")
+    colors = sticker_colors(cube.cp[None], cube.co[None])[0]
+    assert colors[0].tolist() == [F_COL, R_COL, D_COL]
+
+def test_every_color_appears_four_times():
+    cp, co = random_scrambles(50, 20, np.random.default_rng(0))
+    counts = np.stack([np.bincount(c.ravel(), minlength=6) for c in sticker_colors(cp, co)])
+    assert (counts == 4).all()
+
+def test_sticker_encoding_shape_and_distinct_states():
+    cp, co = random_scrambles(200, 10, np.random.default_rng(1))
+    X = encode_stickers(cp, co)
+    assert X.shape == (200, 144) and X.dtype == np.float32
+    assert (X.sum(axis=1) == 24).all() # One color per sticker
+    # Different states never share an encoding
+    keys = {c.tobytes() + o.tobytes() for c, o in zip(cp, co)}
+    assert len({row.tobytes() for row in X}) == len(keys)

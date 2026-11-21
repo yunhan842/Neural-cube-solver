@@ -77,7 +77,8 @@ def astar(start, heuristic, max_expansions=None):
     start_key = start.key()
     best_g = {start_key: 0}
     parent = {start_key: None} # key -> (parent key, move id)
-    stats = {"expanded": 0, "generated": 0}
+    stats = {"expanded": 0, "generated": 0, "stored": 0} # Stats counts "expanded" and "generated" states
+    # and "stored": distinct states kept in memory (best_g/parent dicts) when the search ended
     tiebreak = itertools.count() # Entries are (f, -g, tiebreak, g, key, cube). When equal f, prefer 
     # deeper state. On equal f and g, prefer earlier pushed. Counter also stops comparisons before the cube
     frontier = [(heuristic(start), 0, next(tiebreak), 0, start_key, start)]
@@ -90,8 +91,10 @@ def astar(start, heuristic, max_expansions=None):
         # Goal test on pop instead of push, so that the first found solution is indeed optimal
         # We also require a admissible heuristic (zero and table heuristics are admissible, but a NN one might not be) 
         if cube.is_solved():
+            stats["stored"] = len(best_g)
             return reconstruct_path(parent, k), stats
         if max_expansions is not None and stats["expanded"] >= max_expansions:
+            stats["stored"] = len(best_g)
             return None, stats
         stats["expanded"] += 1
 
@@ -105,6 +108,7 @@ def astar(start, heuristic, max_expansions=None):
                 f = child_g + heuristic(child)
                 heapq.heappush(frontier, (f, -child_g, next(tiebreak), child_g, child_key, child))
                 stats["generated"] += 1
+    stats["stored"] = len(best_g)
     return None, stats
 
 def reconstruct_path(parent, key):

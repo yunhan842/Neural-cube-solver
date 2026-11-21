@@ -100,3 +100,12 @@ def test_astar_gives_up_after_max_expansions():
     deep = Kociemba2x2().apply_sequence("R U2 F R' U F2")
     path, stats = astar(deep, zero_heuristic, max_expansions=10)
     assert path is None and stats["expanded"] == 10
+
+def test_astar_reports_stored_results():
+    # Solved start: no expansion, only start stored
+    _, stats = astar(Kociemba2x2(), zero_heuristic)
+    assert stats == {"expanded": 0, "generated": 0, "stored": 1}
+    # One move away with exact heuristic: expand start, store it and the 9 children
+    table_h = table_heuristic({Kociemba2x2().key(): 0}, 0)
+    _, stats = astar(Kociemba2x2().apply_move("R"), table_h)
+    assert stats == {"expanded": 1, "generated": 9, "stored": 10} 

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from pathlib import Path
-from cube import encode_onehot
+from cube import ENCODINGS
 
 # Value network: one-hot cube encoding (B,88) -> estimated moves to solved (B,1)
 
@@ -42,13 +42,14 @@ def load_model(path):
     model.eval()
     return model, checkpoint["info"]
 
-def network_heuristic(model):
+def network_heuristic(model, encoding="cubie_onehot_88"):
     # Wrap trained DistanceNet as A* heuristic: cube -> estimated moves to solved
     model.eval()
+    encoding = ENCODINGS[encoding]
     def h(cube):
         if cube.is_solved():
             return 0.0
-        x = torch.from_numpy(encode_onehot(cube.cp[None], cube.co[None]))
+        x = torch.from_numpy(encoding(cube.cp[None], cube.co[None]))
         with torch.no_grad():
             # True distances aren't ever negative, so clamp at 0 only makes estimates better
             return max(0.0, model(x).item())

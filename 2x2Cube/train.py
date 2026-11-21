@@ -9,16 +9,16 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 
-from cube import encode_onehot
+from cube import ENCODINGS
 from dataset import load_dataset
 from model import DistanceNet, save_model
 
 # Splits, baselines, and eval for distance regressor
 SPLIT_FRACTIONS = (0.8, 0.1, 0.1) # train, validation, test
 
-def make_xy(cp, co, dist):
+def make_xy(cp, co, dist, encoding="cubie_onehot_88"):
     # Network inputs (N,88) and float targets (N,1); matching shapes will avoid accidental broadcasting
-    X = encode_onehot(cp, co)
+    X = ENCODINGS[encoding](cp, co)
     y = dist.astype(np.float32).reshape(-1, 1)
     return X, y
 
@@ -166,11 +166,12 @@ if __name__ == "__main__":
     parser.add_argument("--split-seed", type=int, default=0, help="which states go to train/val/test")
     parser.add_argument("--seed", type=int, default=0, help="initial weights and shuffle order")
     parser.add_argument("--run-dir", default=None)
+    parser.add_argument("--encoding", choices=list(ENCODINGS), default="cubie_onehot_88")
     args = parser.parse_args()
     run_dir = Path(args.run_dir or f"runs/{time.strftime('%Y-%m-%d_%H%M%S')}")
 
     cp, co, d, max_depth = load_dataset(args.dataset)
-    X, y = make_xy(cp, co, d)
+    X, y = make_xy(cp, co, d, args.encoding)
     train_idx, val_idx, test_idx = split_indices(d, seed=args.split_seed)
     print(f"{len(d):,} states up to depth {max_depth}: "
           f"train {len(train_idx):,}, val {len(val_idx):,}, test {len(test_idx):,}")
@@ -195,7 +196,7 @@ if __name__ == "__main__":
           f"MAE {val_metrics['mae']:.4f}   balanced MAE {val_metrics['balanced_mae']:.4f}")
     print_report(val_report)
 
-    save_model(run_dir / "model.pt", model, encoding="cubie_onehot_88", max_depth=max_depth)
+    save_model(run_dir / "model.pt", model, encoding=args.encoding, max_depth=max_depth)
     record = {
         "dataset": args.dataset,
         "max_depth": max_depth,

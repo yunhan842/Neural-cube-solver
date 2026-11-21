@@ -123,3 +123,24 @@ def encode_onehot(cp, co):
     perm = np.eye(8, dtype=np.float32)[cp]
     twist = np.eye(3, dtype=np.float32)[co]
     return np.concatenate([perm, twist], axis=2).reshape(n, 88)
+
+# Colors on each corner piece, clockwise starting from U/D sticker (Kociemba corner facelet order)
+U_COL, R_COL, F_COL, D_COL, L_COL, B_COL = range(6)
+CORNER_COLORS = np.array([
+    [U_COL, R_COL, F_COL], [U_COL, F_COL, L_COL], [U_COL, L_COL, B_COL], [U_COL, B_COL, R_COL],
+    [D_COL, R_COL, B_COL], [D_COL, F_COL, R_COL], [D_COL, L_COL, F_COL], [D_COL, B_COL, L_COL],
+], dtype=np.int8)
+
+def sticker_colors(cp, co):
+    # (N,8) cp/co -> (N,8,3) color showing on each position's 3 stickers, clockwise from its U/D face
+    # The corner's U/D sticker sits co[i] steps clockwise, so slot j shows the corner sticker (j - co[i]) % 3
+    slots = np.arange(3)
+    return CORNER_COLORS[cp[:, :, None], (slots - co[:, :, None]) % 3]
+
+def encode_stickers(cp, co):
+    # (N,8) cp/co -> (N,144) float32 network input: one-hot color (6) for each of the 24 stickers
+    n = cp.shape[0]
+    return np.eye(6, dtype=np.float32)[sticker_colors(cp, co)].reshape(n, 144)
+
+# Network input encodings by name; name is saved with each model
+ENCODINGS = {"cubie_onehot_88": encode_onehot, "stickers_144": encode_stickers} 
