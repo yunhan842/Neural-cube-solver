@@ -6,7 +6,6 @@ import time
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 
 from cube import ENCODINGS
@@ -86,8 +85,19 @@ def balanced_mae(pred, dist):
     # Average of per-distance MAEs so every distance counts equally however many states it has
     return float(np.mean([r["mae"] for r in per_distance_report(pred, dist)]))
 
+def pick_device(name="cpu"):
+    # "auto" picks a GPU when there is one: cuda (NVIDIA) or mps (Apple), otherwise the cpu
+    if name != "auto":
+        return torch.device(name)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
 def predict(model, X, batch_size=4096):
-    # Model predictions for X (N,88) as a NumPy (N,) array, without building gradient graphs
+    # Model predictions for X (N, input size) as a NumPy (N,) array, without building gradient graphs
+    # Batches go to whichever device the model is on; results come back to the cpu
     if not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
         raise ValueError("batch_size must be a positive integer")
     if X.ndim != 2:
@@ -95,16 +105,19 @@ def predict(model, X, batch_size=4096):
     model.eval()
     if len(X) == 0:
         return np.empty(0, dtype=np.float32)
+    device = next(model.parameters()).device
     preds = []
     with torch.no_grad():
         for start in range(0, len(X), batch_size):
-            preds.append(model(torch.from_numpy(X[start:start + batch_size])).numpy())
+            batch = torch.from_numpy(X[start:start + batch_size]).to(device)
+            preds.append(model(batch).cpu().numpy())
     return np.concatenate(preds).ravel()
 
-def train_model(X_train, y_train, X_val, d_val, hidden_sizes=(256,256), epochs=20, batch_size=256, lr=1e-3, seed=0, log=print):
+def train_model(X_train, y_train, X_val, d_val, hidden_sizes=(256,256), epochs=20, batch_size=256, lr=1e-3,
+                seed=0, device="cpu", select="mse", log=print):
     """
-    Train DistanceNet with MSE and Adam optimizer. Returns model with the weights from the epoch
-    with lowest validation MSE and history of (epoch, train MSE, val MSE)
+    Train DistanceNet with MSE and Adam optimizer on device. Returns model (on the cpu) with the weights from the epoch
+    best validation score, and history of (epoch, train MSE, val MSE, val balanced MAE). select: "mse" or "balanced_mae" picks that best epoch
     """
     if not isinstance(epochs, (int, np.integer)) or epochs < 1:
         raise ValueError("epochs must be a positive integer")
@@ -112,6 +125,8 @@ def train_model(X_train, y_train, X_val, d_val, hidden_sizes=(256,256), epochs=2
         raise ValueError("batch_size must be a positive integer")
     if not np.isfinite(lr) or lr <= 0:
         raise ValueError("lr must be finite and positive")
+    if select not in ("mse", "balanced_mae"):
+        raise ValueError('select must be "mse" or "balanced_mae"')
     if X_train.ndim != 2 or X_val.ndim != 2:
         raise ValueError("X_train and X_val must be two-dimensional arrays")
     if len(X_train) == 0 or len(X_val) == 0:
@@ -122,37 +137,53 @@ def train_model(X_train, y_train, X_val, d_val, hidden_sizes=(256,256), epochs=2
         raise ValueError("y_train must have shape (len(X_train), 1)")
     if np.asarray(d_val).shape != (len(X_val),):
         raise ValueError("d_val must have shape (len(X_val),)")
+    device = torch.device(device)
+    # Weights are created on cpu first, so the start point is the same on every device
     torch.manual_seed(seed)
-    model = DistanceNet(X_train.shape[1], hidden_sizes)
+    model = DistanceNet(X_train.shape[1], hidden_sizes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
-    # Seeded generator so shuffle order is the same every run
-    loader = DataLoader(TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train)),
-                        batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(seed))
-    best_val, best_state, history = float("inf"), None, []
+    # Copy whole training set to the device once. Each step takes a batch by indexing, which is
+    # faster than a Dataloader building every batch one row at a time
+    # loader = DataLoader(TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train)),
+    #                     batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(seed))
+    X_t = torch.from_numpy(X_train).to(device)
+    y_t = torch.from_numpy(y_train).to(device)
+    # Seeded cpu generator, so shuffle order is the same on every run and on every device
+    shuffle = torch.Generator().manual_seed(seed)
+    best_score, best_state, history = float("inf"), None, []
     for epoch in range(1, epochs + 1):
+        start = time.perf_counter()
         model.train()
-        total_loss = 0.0
-        for xb, yb in loader:
+        order = torch.randperm(len(X_t), generator=shuffle).to(device)
+        # Kept on the device: calling .item() every step would make the cpu wait for each GPU batch
+        total_loss = torch.zeros((), device=device)
+        for i in range(0, len(order), batch_size):
+            batch = order[i:i + batch_size]
             optimizer.zero_grad()
-            loss = loss_fn(model(xb), yb)
+            loss = loss_fn(model(X_t[batch]), y_t[batch])
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * len(xb)
+            total_loss += loss.detach() * len(batch)
         # Avg loss over epoch's batches (weights changed during the epoch)
-        train_mse = total_loss / len(X_train)
-        val_mse = regression_metrics(predict(model, X_val), d_val)["mse"]
+        train_mse = total_loss.item() / len(X_t)
+        val_pred = predict(model, X_val)
+        val_mse = regression_metrics(val_pred, d_val)["mse"]
+        val_bal = balanced_mae(val_pred, d_val)
         if not np.isfinite(train_mse) or not np.isfinite(val_mse):
             raise FloatingPointError(f"Non-finite loss at epoch {epoch}: train={train_mse}, validation={val_mse}")
-        history.append((epoch, train_mse, val_mse))
+        history.append((epoch, train_mse, val_mse, val_bal))
         # Keep a copy of the best weights; later epochs keep changing model's own weights
-        if val_mse < best_val:
-            best_val, best_state = val_mse, copy.deepcopy(model.state_dict())
-        log(f"epoch {epoch:>3}   train MSE {train_mse:.4f}   val MSE {val_mse:.4f}"
-            + ("   *" if val_mse == best_val else ""))
+        score = val_mse if select == "mse" else val_bal
+        is_best = score < best_score
+        if is_best:
+            best_score, best_state = score, copy.deepcopy(model.state_dict())
+        log(f"epoch {epoch:>3}   train MSE {train_mse:.4f}   val MSE {val_mse:.4f}   "
+            f"val balanced MAE {val_bal:.3f}   {time.perf_counter() - start:.1f}s" + ("   *" if is_best else ""))
 
     model.load_state_dict(best_state)
-    return model, history
+    # Back to cpu, so saving, predict, and A* heuristic all work without GPU
+    return model.cpu(), history
 
 if __name__ == "__main__":
     # Use: python train.py data/bfs_depth6.npz [--epochs 20 --hidden 256 256 --lr 1e-3 ...]
@@ -167,12 +198,18 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="initial weights and shuffle order")
     parser.add_argument("--run-dir", default=None)
     parser.add_argument("--encoding", choices=list(ENCODINGS), default="cubie_onehot_88")
+    parser.add_argument("--device", choices=["cpu", "mps", "cuda", "auto"], default="cpu")
+    parser.add_argument("--select", choices=["mse", "balanced_mae"], default="mse", 
+                        help="validation metric that picks the saved epoch")
     args = parser.parse_args()
     run_dir = Path(args.run_dir or f"runs/{time.strftime('%Y-%m-%d_%H%M%S')}")
 
     cp, co, d, max_depth = load_dataset(args.dataset)
-    X, y = make_xy(cp, co, d, args.encoding)
     train_idx, val_idx, test_idx = split_indices(d, seed=args.split_seed)
+    # Encode each of them separately, so that the full table never needs to be encoded at once
+    X_train, y_train = make_xy(cp[train_idx], co[train_idx], d[train_idx], args.encoding)
+    X_val, _ = make_xy(cp[val_idx], co[val_idx], d[val_idx], args.encoding)
+    device = pick_device(args.device)
     print(f"{len(d):,} states up to depth {max_depth}: "
           f"train {len(train_idx):,}, val {len(val_idx):,}, test {len(test_idx):,}")
 
@@ -183,14 +220,17 @@ if __name__ == "__main__":
           f"balanced MAE {baseline_metrics['balanced_mae']:.3f}\n")
 
     start = time.perf_counter()
-    model, history = train_model(X[train_idx], y[train_idx], X[val_idx], val_d,
+    print(f"Training on {device}")
+    model, history = train_model(X_train, y_train, X_val, val_d,
                                  hidden_sizes=args.hidden, epochs=args.epochs,
-                                 batch_size=args.batch_size, lr=args.lr, seed=args.seed)
+                                 batch_size=args.batch_size, lr=args.lr, seed=args.seed,
+                                 device=device, select=args.select)
     train_seconds = time.perf_counter() - start
 
-    pred = predict(model, X[val_idx])
+    pred = predict(model, X_val)
     val_metrics = {**regression_metrics(pred, val_d), "balanced_mae": balanced_mae(pred, val_d)}
     val_report = per_distance_report(pred, val_d)
+    metric = 2 if args.select == "mse" else 3 # position of the selection metric in each history entry
     best_epoch = min(history, key=lambda h: h[2])[0]
     print(f"\nNetwork on val (best epoch {best_epoch}): MSE {val_metrics['mse']:.4f}   "
           f"MAE {val_metrics['mae']:.4f}   balanced MAE {val_metrics['balanced_mae']:.4f}")
@@ -204,7 +244,8 @@ if __name__ == "__main__":
         "settings": vars(args),
         "torch_version": torch.__version__,
         "train_seconds": round(train_seconds, 1),
-        "history": [{"epoch": e, "train_mse": t, "val_mse": v} for e, t, v in history],
+        "device": str(device),
+        "history": [{"epoch": e, "train_mse": t, "val_mse": v, "val_balanced_mae": b} for e, t, v, b in history],
         "best_epoch": best_epoch,
         "val": {"baseline": baseline_metrics, "network": val_metrics, "by_distance": val_report},
     }

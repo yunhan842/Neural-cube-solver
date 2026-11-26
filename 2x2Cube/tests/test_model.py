@@ -9,7 +9,8 @@ from pathlib import Path
 from dataset import table_to_arrays, save_dataset
 from model import DistanceNet, save_model, load_model
 from search import bfs
-from train import make_xy, split_indices, regression_metrics, predict, train_model
+from train import (make_xy, split_indices, regression_metrics, predict, 
+                   train_model, balanced_mae, pick_device)
 
 @pytest.fixture(scope="module")
 def data():
@@ -97,3 +98,28 @@ def test_train_script_saves_a_reloadable_run(tmp_path):
     _, val_idx, _ = split_indices(d, seed=1)
     mse = regression_metrics(predict(model, X[val_idx]), d[val_idx])["mse"]
     assert mse == pytest.approx(record["val"]["network"]["mse"])
+
+def test_select_balanced_mae_keeps_that_best_epoch(data):
+    X, y, d, train_idx, val_idx = data
+    model, history = train_model(X[train_idx], y[train_idx], X[val_idx], d[val_idx],
+                                 hidden_sizes=(32,), epochs=5, select="balanced_mae", log=quiet)
+    assert len(history[0]) == 4 # (epoch, train MSE, val MSE, val balanced MAE)
+    best = min(h[3] for h in history)
+    assert balanced_mae(predict(model, X[val_idx]), d[val_idx]) == pytest.approx(best)
+
+def test_unknown_select_raises(data):
+    X, y, d, train_idx, val_idx = data
+    with pytest.raises(ValueError):
+        train_model(X[train_idx], y[train_idx], X[val_idx], d[val_idx], epochs=1, select="mae", log=quiet)
+
+def test_pick_device():
+    assert pick_device("cpu").type == "cpu"
+    assert pick_device("auto").type in {"cpu", "mps", "cuda"}
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no Apple GPU")
+def test_training_on_mps_returns_a_cpu_model(data):
+    X, y, d, train_idx, val_idx = data
+    model, history = train_model(X[train_idx], y[train_idx], X[val_idx], d[val_idx],
+                                 hidden_sizes=(32,), epochs=2, device="mps", log=quiet)
+    assert next(model.parameters()).device.type == "cpu"
+    assert np.isfinite(predict(model, X[val_idx])).all()
